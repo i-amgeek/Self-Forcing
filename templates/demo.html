@@ -189,8 +189,42 @@
         <div class="main-layout">
             <div class="left-column">
                 <div class="controls">
+                    <!-- Mode Selection -->
                     <div class="control-group">
-                        <label for="prompt">Prompt (long, detailed prompts work better):</label>
+                        <label>Generation Mode:</label>
+                        <div style="display: flex; gap: 15px; margin-top: 5px;">
+                            <label style="display: flex; align-items: center; font-weight: normal;">
+                                <input type="radio" name="mode" value="t2v" checked onchange="switchMode('t2v')" style="margin-right: 8px;">
+                                📝 Text-to-Video
+                            </label>
+                            <label style="display: flex; align-items: center; font-weight: normal;">
+                                <input type="radio" name="mode" value="i2v" onchange="switchMode('i2v')" style="margin-right: 8px;">
+                                🖼️ Image-to-Video
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Image Upload Section (hidden by default) -->
+                    <div id="imageUploadSection" class="control-group" style="display: none;">
+                        <label for="imageUpload">Upload Image:</label>
+                        <div id="imageDropZone" style="border: 2px dashed #ddd; border-radius: 8px; padding: 20px; text-align: center; cursor: pointer; margin-bottom: 10px;">
+                            <input type="file" id="imageUpload" accept="image/*" style="display: none;" onchange="handleImageUpload(event)">
+                            <div id="dropZoneText">
+                                <p>📁 Click to upload or drag & drop an image</p>
+                                <p style="font-size: 0.9em; color: #666;">Supported: JPG, PNG, WebP</p>
+                            </div>
+                            <div id="imagePreview" style="display: none;">
+                                <img id="previewImg" style="max-width: 200px; max-height: 150px; border-radius: 4px;">
+                                <p id="imageInfo" style="margin-top: 8px; font-size: 0.9em; color: #666;"></p>
+                                <button type="button" onclick="clearImage()" style="margin-top: 8px; background-color: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">Remove</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="prompt">
+                            <span id="promptLabel">Prompt (long, detailed prompts work better):</span>
+                        </label>
                         <textarea id="prompt" placeholder="Describe the video you want to generate..."></textarea>
 
                         <div style="margin-top: 10px;">
@@ -371,9 +405,141 @@
         // Update toggle states on page load
         updateToggleStates();
 
+        // I2V Mode Variables
+        let currentMode = 't2v';
+        let uploadedImage = null;
+
+        // Mode switching function
+        function switchMode(mode) {
+            currentMode = mode;
+            const imageUploadSection = document.getElementById('imageUploadSection');
+            const promptLabel = document.getElementById('promptLabel');
+            const startBtn = document.getElementById('startBtn');
+            
+            if (mode === 'i2v') {
+                imageUploadSection.style.display = 'block';
+                promptLabel.textContent = 'Prompt (describe how the image should animate):';
+                document.getElementById('prompt').placeholder = 'Describe how you want the image to animate...';
+                startBtn.textContent = '🚀 Start I2V Generation';
+                
+                // Notify backend of mode change
+                socket.emit('set_mode', { mode: 'i2v' });
+            } else {
+                imageUploadSection.style.display = 'none';
+                promptLabel.textContent = 'Prompt (long, detailed prompts work better):';
+                document.getElementById('prompt').placeholder = 'Describe the video you want to generate...';
+                startBtn.textContent = '🚀 Start Generation';
+                
+                // Notify backend of mode change
+                socket.emit('set_mode', { mode: 't2v' });
+            }
+        }
+
+        // Image upload handling
+        function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                processImageFile(file);
+            }
+        }
+
+        function processImageFile(file) {
+            // Validate file type
+            if (!file.type.startsWith('image/')) {
+                alert('Please select a valid image file (JPG, PNG, WebP)');
+                return;
+            }
+
+            // Validate file size (max 10MB)
+            if (file.size > 10 * 1024 * 1024) {
+                alert('Image file is too large. Please select an image smaller than 10MB.');
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const imageData = e.target.result;
+                
+                // Show preview
+                showImagePreview(imageData, file);
+                
+                // Send to backend
+                socket.emit('upload_image', { image_data: imageData });
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function showImagePreview(imageData, file) {
+            const dropZoneText = document.getElementById('dropZoneText');
+            const imagePreview = document.getElementById('imagePreview');
+            const previewImg = document.getElementById('previewImg');
+            const imageInfo = document.getElementById('imageInfo');
+            
+            dropZoneText.style.display = 'none';
+            imagePreview.style.display = 'block';
+            
+            previewImg.src = imageData;
+            imageInfo.textContent = `${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
+            
+            uploadedImage = imageData;
+        }
+
+        function clearImage() {
+            const dropZoneText = document.getElementById('dropZoneText');
+            const imagePreview = document.getElementById('imagePreview');
+            const imageUpload = document.getElementById('imageUpload');
+            
+            dropZoneText.style.display = 'block';
+            imagePreview.style.display = 'none';
+            imageUpload.value = '';
+            uploadedImage = null;
+        }
+
+        // Drag and drop functionality
+        const imageDropZone = document.getElementById('imageDropZone');
+        
+        imageDropZone.addEventListener('click', function() {
+            document.getElementById('imageUpload').click();
+        });
+
+        imageDropZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            imageDropZone.style.borderColor = '#007bff';
+            imageDropZone.style.backgroundColor = '#f8f9fa';
+        });
+
+        imageDropZone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            imageDropZone.style.borderColor = '#ddd';
+            imageDropZone.style.backgroundColor = 'transparent';
+        });
+
+        imageDropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            imageDropZone.style.borderColor = '#ddd';
+            imageDropZone.style.backgroundColor = 'transparent';
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                processImageFile(files[0]);
+            }
+        });
+
         // Socket event handlers
         socket.on('connect', function() {
             // showStatus('Connected to frontend-buffered server', 'info');
+        });
+
+        socket.on('mode_changed', function(data) {
+            console.log('Mode changed to:', data.mode);
+        });
+
+        socket.on('image_uploaded', function(data) {
+            console.log('Image uploaded successfully:', data);
+            showStatus(`Image uploaded: ${data.size[0]}x${data.size[1]}`, 'success');
         });
 
         socket.on('status', function(data) {
@@ -428,6 +594,12 @@
                 return;
             }
 
+            // Validate I2V requirements
+            if (currentMode === 'i2v' && !uploadedImage) {
+                alert('Please upload an image for Image-to-Video generation');
+                return;
+            }
+
             const seed = parseInt(document.getElementById('seed').value) || 31337;
             // const totalBlocks = parseInt(document.getElementById('blocks').value) || 7;
             const enableTorchCompile = document.getElementById('torchCompile').checked;
@@ -447,6 +619,7 @@
             socket.emit('start_generation', {
                 prompt: prompt,
                 seed: seed,
+                mode: currentMode,
                 enable_torch_compile: enableTorchCompile,
                 enable_fp8: enableFp8,
                 use_taehv: useTaehv

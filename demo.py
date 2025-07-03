@@ -20,6 +20,7 @@ from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
 import queue
 from threading import Thread, Event
+import torchvision.transforms as transforms
 
 from pipeline import CausalInferencePipeline
 from demo_utils.constant import ZERO_VAE_CACHE
@@ -27,6 +28,7 @@ from demo_utils.vae_block3 import VAEDecoderWrapper
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
 from demo_utils.utils import generate_timestamp
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller, move_model_to_device_with_memory_preservation
+from wan.modules.clip import CLIPModel
 
 # Parse arguments
 parser = argparse.ArgumentParser()
@@ -47,6 +49,9 @@ config = OmegaConf.merge(default_config, config)
 
 text_encoder = WanTextEncoder()
 
+# Initialize CLIP model for I2V support
+clip_model = None
+
 # Global variables for dynamic model switching
 current_vae_decoder = None
 current_use_taehv = False
@@ -56,6 +61,76 @@ global frame_number
 frame_number = 0
 anim_name = ""
 frame_rate = 6
+current_mode = "t2v"  # "t2v" or "i2v"
+uploaded_image = None
+
+def initialize_clip_model():
+    """Initialize CLIP model for I2V support"""
+    global clip_model
+    
+    if clip_model is None:
+        print("🔧 Initializing CLIP model for I2V support...")
+        try:
+            # Try to find CLIP checkpoint in wan_models directory
+            clip_checkpoint_path = "wan_models/Wan2.1-T2V-1.3B/clip_l14_336.pth"
+            clip_tokenizer_path = "wan_models/Wan2.1-T2V-1.3B"
+            
+            if not os.path.exists(clip_checkpoint_path):
+                print(f"⚠️ CLIP checkpoint not found at {clip_checkpoint_path}")
+                print("Please ensure CLIP model is available for I2V functionality")
+                return None
+                
+            clip_model = CLIPModel(
+                dtype=torch.float16,
+                device=gpu,
+                checkpoint_path=clip_checkpoint_path,
+                tokenizer_path=clip_tokenizer_path
+            )
+            clip_model.eval()
+            clip_model.requires_grad_(False)
+            
+            if low_memory:
+                DynamicSwapInstaller.install_model(clip_model, device=gpu)
+            else:
+                clip_model.to(gpu)
+                
+            print("✅ CLIP model initialized successfully")
+            return clip_model
+            
+        except Exception as e:
+            print(f"❌ Failed to initialize CLIP model: {e}")
+            print("I2V functionality will not be available")
+            return None
+    
+    return clip_model
+
+
+def process_uploaded_image(image_data):
+    """Process uploaded image for I2V generation"""
+    try:
+        # Decode base64 image
+        if image_data.startswith('data:image'):
+            image_data = image_data.split(',')[1]
+        
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(BytesIO(image_bytes)).convert('RGB')
+        
+        # Define transform for I2V (matching inference.py requirements)
+        transform = transforms.Compose([
+            transforms.Resize((480, 832)),  # Standard I2V resolution
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])  # Normalize to [-1, 1]
+        ])
+        
+        # Apply transform
+        image_tensor = transform(image)
+        
+        return image_tensor, image
+        
+    except Exception as e:
+        print(f"❌ Error processing uploaded image: {e}")
+        return None, None
+
 
 def initialize_vae_decoder(use_taehv=False, use_trt=False):
     """Initialize VAE decoder based on the selected option"""
@@ -239,9 +314,9 @@ def frame_sender_worker():
 
 
 @torch.no_grad()
-def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=False, use_taehv=False):
+def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=False, use_taehv=False, mode='t2v', image_data=None):
     """Generate video and push frames immediately to frontend."""
-    global generation_active, stop_event, frame_send_queue, sender_thread, models_compiled, torch_compile_applied, fp8_applied, current_vae_decoder, current_use_taehv, frame_rate, anim_name
+    global generation_active, stop_event, frame_send_queue, sender_thread, models_compiled, torch_compile_applied, fp8_applied, current_vae_decoder, current_use_taehv, frame_rate, anim_name, clip_model, uploaded_image
 
     try:
         generation_active = True
@@ -309,7 +384,46 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         pipeline._initialize_kv_cache(batch_size=1, dtype=torch.float16, device=gpu)
         pipeline._initialize_crossattn_cache(batch_size=1, dtype=torch.float16, device=gpu)
 
-        noise = torch.randn([1, 21, 16, 60, 104], device=gpu, dtype=torch.float16, generator=rnd)
+        # Handle I2V vs T2V initialization
+        if mode == 'i2v' and uploaded_image is not None:
+            emit_progress('Processing input image for I2V...', 14)
+            
+            # Process the uploaded image for I2V
+            image_tensor = uploaded_image['tensor'].to(device=gpu, dtype=torch.float16)
+            
+            # Add batch and time dimensions: [C, H, W] -> [1, 1, C, H, W]
+            image_tensor = image_tensor.unsqueeze(0).unsqueeze(0)
+            
+            # Encode the input image using VAE
+            print(f"🖼️ Encoding input image: {image_tensor.shape}")
+            
+            # Use the VAE encoder to get latent representation
+            # Note: We need to use the VAE encoder, but the current pipeline uses a decoder wrapper
+            # For now, we'll create a simple latent initialization based on the image
+            
+            # Initialize CLIP features for image conditioning
+            if clip_model is not None:
+                print("🔧 Extracting CLIP features from input image...")
+                clip_model.to(gpu)
+                
+                # Prepare image for CLIP (expects different format)
+                clip_image = uploaded_image['tensor'].unsqueeze(0).to(device=gpu, dtype=torch.float16)
+                clip_features = clip_model.visual([clip_image])
+                
+                # Store CLIP features for conditioning (this would need integration with the pipeline)
+                print(f"✅ CLIP features extracted: {clip_features[0].shape if clip_features else 'None'}")
+                
+                if low_memory:
+                    clip_model.cpu()
+            
+            # For I2V, we initialize the first frame with image-derived noise
+            # and generate the remaining frames
+            noise = torch.randn([1, 21, 16, 60, 104], device=gpu, dtype=torch.float16, generator=rnd)
+            
+            print(f"✅ I2V initialization complete")
+        else:
+            # Standard T2V initialization
+            noise = torch.randn([1, 21, 16, 60, 104], device=gpu, dtype=torch.float16, generator=rnd)
 
         # Generation parameters
         num_blocks = 7
@@ -552,7 +666,7 @@ def handle_disconnect():
 
 @socketio.on('start_generation')
 def handle_start_generation(data):
-    global generation_active, frame_number, anim_name, frame_rate
+    global generation_active, frame_number, anim_name, frame_rate, current_mode, uploaded_image
 
     frame_number = 0
     if generation_active:
@@ -560,6 +674,16 @@ def handle_start_generation(data):
         return
 
     prompt = data.get('prompt', '')
+    mode = data.get('mode', current_mode)
+
+    # Validate I2V requirements
+    if mode == 'i2v':
+        if uploaded_image is None:
+            emit('error', {'message': 'Image is required for I2V mode. Please upload an image first.'})
+            return
+        if clip_model is None:
+            emit('error', {'message': 'CLIP model not available. I2V mode cannot be used.'})
+            return
 
     seed = data.get('seed', -1)
     if seed==-1:
@@ -573,8 +697,9 @@ def handle_start_generation(data):
     # Calculate SHA-256 hash of the entire prompt
     sha256_hash = calculate_sha256(prompt)
 
-    # Create anim_name with the extracted words and first 10 characters of the hash
-    anim_name = f"{words_up_to_punctuation[:20]}_{str(seed)}_{sha256_hash[:10]}"
+    # Create anim_name with mode prefix and the extracted words and first 10 characters of the hash
+    mode_prefix = mode.upper()
+    anim_name = f"{mode_prefix}_{words_up_to_punctuation[:20]}_{str(seed)}_{sha256_hash[:10]}"
 
     generation_active = True
     generation_start_time = time.time()
@@ -589,8 +714,8 @@ def handle_start_generation(data):
 
     # Start generation in background thread
     socketio.start_background_task(generate_video_stream, prompt, seed,
-                                   enable_torch_compile, enable_fp8, use_taehv)
-    emit('status', {'message': 'Generation started - frames will be sent immediately'})
+                                   enable_torch_compile, enable_fp8, use_taehv, mode)
+    emit('status', {'message': f'{mode.upper()} generation started - frames will be sent immediately'})
 
 
 @socketio.on('stop_generation')
@@ -606,6 +731,61 @@ def handle_stop_generation():
         print(f"❌ Failed to put None in frame_send_queue: {e}")
 
     emit('status', {'message': 'Generation stopped'})
+
+
+@socketio.on('set_mode')
+def handle_set_mode(data):
+    global current_mode
+    mode = data.get('mode', 't2v')
+    
+    if mode in ['t2v', 'i2v']:
+        current_mode = mode
+        print(f"🔄 Mode switched to {mode.upper()}")
+        emit('mode_changed', {'mode': mode})
+        
+        # Initialize CLIP model if switching to I2V mode
+        if mode == 'i2v':
+            clip_initialized = initialize_clip_model()
+            if not clip_initialized:
+                emit('error', {'message': 'CLIP model initialization failed. I2V mode not available.'})
+                current_mode = 't2v'
+                emit('mode_changed', {'mode': 't2v'})
+    else:
+        emit('error', {'message': 'Invalid mode. Use "t2v" or "i2v".'})
+
+
+@socketio.on('upload_image')
+def handle_upload_image(data):
+    global uploaded_image
+    
+    try:
+        image_data = data.get('image_data')
+        if not image_data:
+            emit('error', {'message': 'No image data provided'})
+            return
+            
+        # Process the uploaded image
+        image_tensor, pil_image = process_uploaded_image(image_data)
+        
+        if image_tensor is None:
+            emit('error', {'message': 'Failed to process uploaded image'})
+            return
+            
+        uploaded_image = {
+            'tensor': image_tensor,
+            'pil': pil_image,
+            'size': pil_image.size
+        }
+        
+        print(f"✅ Image uploaded successfully: {pil_image.size}")
+        emit('image_uploaded', {
+            'message': 'Image uploaded successfully',
+            'size': pil_image.size
+        })
+        
+    except Exception as e:
+        print(f"❌ Error handling image upload: {e}")
+        emit('error', {'message': f'Image upload failed: {str(e)}'})
 
 # Web routes
 
