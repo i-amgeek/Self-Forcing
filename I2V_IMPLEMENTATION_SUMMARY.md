@@ -100,7 +100,9 @@ if mode == 'i2v' and uploaded_image is not None:
 ### Core Files
 - **`demo.py`**: Added I2V backend logic, CLIP integration, image processing
 - **`templates/demo.html`**: Added I2V UI components, JavaScript handlers
+- **`gradio_demo.py`**: New Gradio interface with public sharing support
 - **`test_i2v_integration.py`**: Comprehensive test suite for I2V features
+- **`requirements.txt`**: Updated to include Gradio dependency
 
 ### Key Functions Added
 - `initialize_clip_model()`: CLIP model setup for I2V
@@ -116,20 +118,43 @@ if mode == 'i2v' and uploaded_image is not None:
 ```bash
 # Ensure CLIP model is available
 # Expected path: wan_models/Wan2.1-T2V-1.3B/clip_l14_336.pth
+
+# Install Gradio (if using Gradio interface)
+pip install gradio>=4.0.0
 ```
 
 ### 2. **Start the Demo**
+
+#### Option A: Flask Demo (Real-time streaming)
 ```bash
 python demo.py --port 5001
 ```
 
+#### Option B: Gradio Demo (Public sharing support)
+```bash
+# Local access only
+python gradio_demo.py --port 7860
+
+# Create public shareable link
+python gradio_demo.py --share --port 7860
+```
+
 ### 3. **Use I2V Generation**
+
+#### Flask Interface:
 1. Open the web interface
 2. Select "🖼️ Image-to-Video" mode
 3. Upload an image (drag & drop or click)
 4. Enter animation prompt (e.g., "The person starts walking forward")
 5. Configure generation settings
 6. Click "🚀 Start I2V Generation"
+
+#### Gradio Interface:
+1. Open the Gradio interface
+2. Upload an image (optional - leave empty for T2V)
+3. Enter your prompt
+4. Adjust settings in "Advanced Settings" if needed
+5. Click "🚀 Generate Video"
 
 ### 4. **Example Prompts for I2V**
 - "The person starts walking forward slowly"
@@ -167,6 +192,7 @@ Expected output:
 
 ## 📋 Feature Comparison
 
+### Generation Modes
 | Feature | T2V | I2V |
 |---------|-----|-----|
 | Input | Text prompt only | Image + text prompt |
@@ -175,6 +201,19 @@ Expected output:
 | Conditioning | Text embeddings | Image + text embeddings |
 | CLIP Model | Optional | Required |
 | Use Cases | Creative generation | Animation from stills |
+
+### Interface Comparison
+| Feature | Flask Demo | Gradio Demo |
+|---------|------------|-------------|
+| **Real-time Streaming** | ✅ Frame-by-frame | ❌ Complete video only |
+| **Public Sharing** | ❌ Local only | ✅ `--share` flag |
+| **Progress Tracking** | ✅ Live updates | ✅ Progress bar |
+| **Image Upload** | ✅ Drag & drop | ✅ Built-in uploader |
+| **Advanced Settings** | ✅ Toggles | ✅ Collapsible accordion |
+| **Examples** | ✅ Quick prompts | ✅ Example gallery |
+| **Mobile Friendly** | ✅ Responsive | ✅ Responsive |
+| **Setup Complexity** | Medium | Simple |
+| **Best For** | Development/Testing | Public demos/Sharing |
 
 ## 🚨 Requirements & Dependencies
 

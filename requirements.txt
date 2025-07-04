@@ -37,4 +37,5 @@ onnxscript
 onnxconverter_common
 flask
 flask-socketio
+gradio>=4.0.0
 torchao
