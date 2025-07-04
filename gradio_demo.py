@@ -227,9 +227,20 @@ def generate_mp4_from_images(image_directory, output_video_path, fps=24):
         return False
 
 @torch.no_grad()
-def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enable_fp8=False, use_taehv=False, fps=6, progress=gr.Progress()):
+def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enable_fp8=False, use_taehv=False, fps=6, progress=None):
     """Generate video with progress tracking"""
     global current_vae_decoder, current_use_taehv, fp8_applied, torch_compile_applied, models_compiled, clip_model
+    
+    # Handle progress function compatibility
+    def update_progress(value, desc=""):
+        if progress is not None:
+            try:
+                progress(value, desc=desc)
+            except:
+                try:
+                    progress(value)
+                except:
+                    pass
     
     try:
         # Determine mode
@@ -257,23 +268,23 @@ def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enab
         output_dir = f"./gradio_outputs/{anim_name}"
         os.makedirs(output_dir, exist_ok=True)
         
-        progress(0.05, desc="Initializing generation...")
+        update_progress(0.05, "Initializing generation...")
         
         # Handle VAE decoder switching
         if use_taehv != current_use_taehv:
-            progress(0.1, desc="Switching VAE decoder...")
+            update_progress(0.1, "Switching VAE decoder...")
             current_vae_decoder = initialize_vae_decoder(use_taehv=use_taehv)
             pipeline.vae = current_vae_decoder
         
         # Handle FP8 quantization
         if enable_fp8 and not fp8_applied:
-            progress(0.15, desc="Applying FP8 quantization...")
+            update_progress(0.15, "Applying FP8 quantization...")
             from torchao.quantization.quant_api import quantize_, Float8DynamicActivationFloat8WeightConfig, PerTensor
             quantize_(transformer, Float8DynamicActivationFloat8WeightConfig(granularity=PerTensor()))
             fp8_applied = True
         
         # Text encoding
-        progress(0.2, desc="Encoding text prompt...")
+        update_progress(0.2, "Encoding text prompt...")
         conditional_dict = text_encoder(text_prompts=[prompt])
         for key, value in conditional_dict.items():
             conditional_dict[key] = value.to(dtype=torch.float16)
@@ -285,14 +296,14 @@ def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enab
         
         # Handle torch.compile
         if enable_torch_compile and not models_compiled:
-            progress(0.25, desc="Compiling models (first time only)...")
+            update_progress(0.25, "Compiling models (first time only)...")
             transformer.compile(mode="max-autotune-no-cudagraphs")
             if not current_use_taehv and not low_memory and not args.trt:
                 current_vae_decoder.compile(mode="max-autotune-no-cudagraphs")
             models_compiled = True
         
         # Initialize generation
-        progress(0.3, desc="Initializing generation...")
+        update_progress(0.3, "Initializing generation...")
         rnd = torch.Generator(gpu).manual_seed(seed)
         
         pipeline._initialize_kv_cache(batch_size=1, dtype=torch.float16, device=gpu)
@@ -300,7 +311,7 @@ def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enab
         
         # Handle I2V vs T2V initialization
         if mode == 'i2v' and image is not None:
-            progress(0.35, desc="Processing input image for I2V...")
+            update_progress(0.35, "Processing input image for I2V...")
             
             # Process the uploaded image
             image_result = process_uploaded_image(image)
@@ -340,7 +351,7 @@ def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enab
         # Generation loop
         for idx, current_num_frames in enumerate(all_num_frames):
             block_progress = 0.4 + (idx / len(all_num_frames)) * 0.5
-            progress(block_progress, desc=f"Generating block {idx+1}/{len(all_num_frames)}...")
+            update_progress(block_progress, f"Generating block {idx+1}/{len(all_num_frames)}...")
             
             noisy_input = noise[:, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
             
@@ -386,7 +397,7 @@ def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enab
             
             # Decode to pixels
             decode_progress = block_progress + 0.02
-            progress(decode_progress, desc=f"Decoding block {idx+1} to pixels...")
+            update_progress(decode_progress, f"Decoding block {idx+1} to pixels...")
             
             if args.trt:
                 all_current_pixels = []
@@ -431,11 +442,11 @@ def generate_video(prompt, image=None, seed=-1, enable_torch_compile=False, enab
             current_start_frame += current_num_frames
         
         # Create video
-        progress(0.95, desc="Creating video file...")
+        update_progress(0.95, "Creating video file...")
         video_path = os.path.join(output_dir, f"{anim_name}.mp4")
         success = generate_mp4_from_images(output_dir, video_path, fps)
         
-        progress(1.0, desc="Generation complete!")
+        update_progress(1.0, "Generation complete!")
         
         if success and os.path.exists(video_path):
             return video_path, f"✅ Generated {total_frames_generated} frames successfully!"
@@ -595,6 +606,5 @@ if __name__ == "__main__":
         server_name=args.host,
         server_port=args.port,
         share=args.share,
-        show_error=True,
-        show_tips=True
+        show_error=True
     )

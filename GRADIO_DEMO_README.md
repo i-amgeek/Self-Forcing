@@ -16,7 +16,7 @@ A user-friendly Gradio interface for Self-Forcing video generation with **public
 
 ### 1. Install Dependencies
 ```bash
-pip install gradio>=4.0.0
+pip install gradio>=3.50.0
 ```
 
 ### 2. Launch Demo
