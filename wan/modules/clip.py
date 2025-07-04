@@ -515,18 +515,33 @@ class CLIPModel:
             device=device)
         self.model = self.model.eval().requires_grad_(False)
         logging.info(f'loading {checkpoint_path}')
-        self.model.load_state_dict(
-            torch.load(checkpoint_path, map_location='cpu', weights_only=False))
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        
+        # Handle TorchScript models
+        if isinstance(checkpoint, torch.jit._script.RecursiveScriptModule):
+            # For TorchScript models, replace the model entirely
+            original_max_text_len = self.model.max_text_len  # Save before replacement
+            self.model = checkpoint
+            self.model.max_text_len = original_max_text_len  # Restore attribute
+        else:
+            # For regular state dict
+            self.model.load_state_dict(checkpoint)
 
         # init tokenizer
+        max_text_len = getattr(self.model, 'max_text_len', 514)  # Default fallback
         self.tokenizer = HuggingfaceTokenizer(
             name=tokenizer_path,
-            seq_len=self.model.max_text_len - 2,
+            seq_len=max_text_len - 2,
             clean='whitespace')
 
     def visual(self, videos):
         # preprocess
-        size = (self.model.image_size,) * 2
+        if hasattr(self.model, 'image_size'):
+            size = (self.model.image_size,) * 2
+        else:
+            # Fallback for TorchScript models
+            size = (224, 224)
+            
         videos = torch.cat([
             F.interpolate(
                 u.transpose(0, 1),
@@ -538,5 +553,15 @@ class CLIPModel:
 
         # forward
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            out = self.model.visual(videos, use_31_block=True)
+            # Handle both regular models and TorchScript models
+            if hasattr(self.model, 'visual') and callable(getattr(self.model, 'visual')):
+                # Regular PyTorch model
+                try:
+                    out = self.model.visual(videos, use_31_block=True)
+                except TypeError:
+                    # Fallback if use_31_block parameter not supported
+                    out = self.model.visual(videos)
+            else:
+                # TorchScript model - call directly
+                out = self.model(videos)
             return out
