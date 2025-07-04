@@ -25,6 +25,7 @@ from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
 from demo_utils.utils import generate_timestamp
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller, move_model_to_device_with_memory_preservation
 from wan.modules.clip import CLIPModel
+from wan.modules.clip_diffusers import create_clip_model
 
 # Parse arguments
 parser = argparse.ArgumentParser()
@@ -63,32 +64,60 @@ def initialize_clip_model():
     if clip_model is None:
         print("🔧 Initializing CLIP model for I2V support...")
         try:
-            clip_checkpoint_path = "wan_models/Wan2.1-T2V-1.3B/clip_l14_336.pth"
-            clip_tokenizer_path = "wan_models/Wan2.1-T2V-1.3B"
+            # Try Diffusers format first (your downloaded model)
+            diffusers_clip_path = "wan_models/Wan2.1-I2V-14B-480P-Diffusers/image_encoder"
+            native_clip_path = "wan_models/Wan2.1-T2V-1.3B/clip_l14_336.pth"
+            tokenizer_path = "wan_models/Wan2.1-I2V-14B-480P-Diffusers/tokenizer"
             
-            if not os.path.exists(clip_checkpoint_path):
-                print(f"⚠️ CLIP checkpoint not found at {clip_checkpoint_path}")
+            # Check which format is available
+            if os.path.exists(diffusers_clip_path):
+                print(f"📁 Found Diffusers CLIP model at {diffusers_clip_path}")
+                clip_model = create_clip_model(
+                    dtype=torch.float16,
+                    device=gpu,
+                    model_path=diffusers_clip_path,
+                    tokenizer_path=tokenizer_path
+                )
+            elif os.path.exists(native_clip_path):
+                print(f"📁 Found native CLIP model at {native_clip_path}")
+                clip_model = CLIPModel(
+                    dtype=torch.float16,
+                    device=gpu,
+                    checkpoint_path=native_clip_path,
+                    tokenizer_path="wan_models/Wan2.1-T2V-1.3B"
+                )
+            else:
+                print(f"⚠️ CLIP model not found at either:")
+                print(f"   - {diffusers_clip_path} (Diffusers format)")
+                print(f"   - {native_clip_path} (Native format)")
                 return None
-                
-            clip_model = CLIPModel(
-                dtype=torch.float16,
-                device=gpu,
-                checkpoint_path=clip_checkpoint_path,
-                tokenizer_path=clip_tokenizer_path
-            )
-            clip_model.eval()
-            clip_model.requires_grad_(False)
+            
+            # Set model properties
+            if hasattr(clip_model, 'model'):
+                clip_model.model.eval()
+                clip_model.model.requires_grad_(False)
+            else:
+                clip_model.eval()
+                clip_model.requires_grad_(False)
             
             if low_memory:
-                DynamicSwapInstaller.install_model(clip_model, device=gpu)
+                if hasattr(clip_model, 'model'):
+                    DynamicSwapInstaller.install_model(clip_model.model, device=gpu)
+                else:
+                    DynamicSwapInstaller.install_model(clip_model, device=gpu)
             else:
-                clip_model.to(gpu)
+                if hasattr(clip_model, 'model'):
+                    clip_model.model.to(gpu)
+                else:
+                    clip_model.to(gpu)
                 
             print("✅ CLIP model initialized successfully")
             return clip_model
             
         except Exception as e:
             print(f"❌ Failed to initialize CLIP model: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     return clip_model

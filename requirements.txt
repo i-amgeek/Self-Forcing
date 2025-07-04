@@ -39,3 +39,4 @@ flask
 flask-socketio
 gradio>=3.50.0
 torchao
+safetensors
